@@ -116,7 +116,8 @@ function criarApiSupabase() {
     salvarPedido: p => tenta(async () => ok(await sb.rpc("salvar_pedido", { p }))),
     receber: a => tenta(async () => ok(await sb.rpc("receber_pagamento", a))),
     importar: b => tenta(async () => ok(await sb.rpc("importar_backup", { b }))),
-    perfis: () => tenta(async () => ok(await sb.from("perfis").select("*").order("criado_em"))),
+    perfis: () => tenta(async () => ok(await sb.rpc("listar_usuarios"))),
+    confirmarEmail: id => tenta(async () => ok(await sb.rpc("confirmar_email", { p_id: id }))),
     auditoria: () => tenta(async () => ok(await sb.from("auditoria").select("*").order("quando", { ascending: false }).limit(150)))
   };
 }
@@ -859,20 +860,46 @@ function formServico(id) {
 async function vUsuarios() {
   $("#view").innerHTML = `<div class="pagehead"><div><div class="eyebrow">Administração</div><h1>Usuários</h1><p>Carregando…</p></div></div>`;
   let perfis;
-  try { perfis = await api.perfis(); } catch (e) { $("#view").innerHTML = `<div class="alerta erro">${esc(traduzErro(e).message)}</div>`; return; }
+  try { perfis = await api.perfis(); } catch (e) {
+    $("#view").innerHTML = `<div class="alerta erro"><span>${esc(traduzErro(e).message)}${/não tem permissão|function|listar_usuarios/i.test(String(e.message)) ? " Se acabou de atualizar o sistema, rode o arquivo atualizacao-usuarios.sql no Supabase." : ""}</span></div>`; return;
+  }
   if (ST.tab !== "usuarios") return;
+  const pend = perfis.filter(u => !u.ativo), ativos = perfis.filter(u => u.ativo);
+  const admins = ativos.filter(u => u.papel === "admin").length;
+  const acessoTag = u => u.papel === "admin" ? `<span class="chip st-pronto">Administrador</span>` : `<span class="chip st-recebido">Ateliê</span>`;
+  const confTag = u => u.email_confirmado ? `<span class="pay done">confirmado</span>` : `<span class="pay open">não confirmado</span>`;
+  const ultimo = u => u.ultimo_acesso ? new Date(u.ultimo_acesso).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit" }) : "nunca entrou";
+  const linha = u => `<tr>
+    <td><strong>${esc(u.nome || "—")}</strong>${u.id === EU.id ? ' <span class="tag">você</span>' : ""}<div class="hint">${esc(u.email)}</div></td>
+    <td>${u.ativo ? acessoTag(u) : '<span class="pay open">bloqueado</span>'}</td>
+    <td>${confTag(u)}</td>
+    <td class="num">${ultimo(u)}</td>
+    <td class="n"><div class="acoes" style="justify-content:flex-end">
+      ${u.ativo ? "" : `<button class="btn primary small" data-liberar="${u.id}">Liberar como Ateliê</button>`}
+      ${!u.email_confirmado ? `<button class="btn ghost small" data-conf="${u.id}">Confirmar e-mail</button>` : ""}
+      <button class="btn ghost small" data-usr="${u.id}">Editar</button></div></td></tr>`;
+  const tabela = (lista, vazio) => `<div class="tablewrap"><table><thead><tr><th>Nome</th><th>Acesso</th><th>E-mail</th><th>Último acesso</th><th></th></tr></thead><tbody>${lista.length ? lista.map(linha).join("") : `<tr><td colspan="5" class="empty" style="text-align:left">${vazio}</td></tr>`}</tbody></table></div>`;
   $("#view").innerHTML = `
-  <div class="pagehead"><div><div class="eyebrow">Administração</div><h1>Usuários</h1><p>Quem pode entrar no sistema</p></div></div>
-  <div class="tablewrap"><table><thead><tr><th>Nome</th><th>E-mail</th><th>Acesso</th><th>Situação</th><th></th></tr></thead><tbody>
-  ${perfis.slice().sort((a, b) => a.ativo - b.ativo).map(u => `<tr><td><strong>${esc(u.nome || "—")}</strong>${u.id === EU.id ? ' <span class="tag">você</span>' : ""}</td><td>${esc(u.email)}</td><td><span class="tag">${u.papel === "admin" ? "Administrador" : "Ateliê"}</span></td><td>${u.ativo ? '<span class="pay done">ativo</span>' : '<span class="pay open">bloqueado</span>'}</td><td class="n"><button class="btn ghost small" data-usr="${u.id}">Editar</button></td></tr>`).join("")}
-  </tbody></table></div>
-  <div class="note" style="margin-top:14px;display:grid;gap:6px">
-    <strong>Como adicionar alguém</strong>
-    <span>1. A pessoa toca em “Criar conta” na tela de entrada (ou você cria em Supabase → Authentication → Users → Add user).</span>
-    <span>2. Ela aparece aqui como <em>bloqueada</em>. Toque em Editar, confira o nome, escolha o acesso e marque “Acesso liberado”.</span>
-    <span>Cadastro de desconhecido: deixe bloqueado ou exclua em Supabase → Authentication → Users.</span>
-    <span><strong>Ateliê</strong>: pedidos, clientes, caixa, relatórios e preços. <strong>Administrador</strong>: tudo isso + usuários, investimentos, categorias, taxas, backup e histórico.</span>
+  <div class="pagehead"><div><div class="eyebrow">Administração</div><h1>Usuários</h1><p>${ativos.length} com acesso · ${admins} administrador(es) · ${pend.length} aguardando</p></div></div>
+  ${pend.length ? `<section class="block"><h2>Aguardando liberação</h2>${tabela(pend, "")}<p class="hint" style="margin-top:8px">Libere só quem você conhece. “Liberar como Ateliê” também confirma o e-mail.</p></section>` : ""}
+  <section class="block"><h2>Com acesso</h2>${tabela(ativos, "Ninguém com acesso.")}</section>
+  <div class="note" style="display:grid;gap:6px">
+    <strong>O que cada acesso pode fazer</strong>
+    <span><strong>Ateliê</strong>: pedidos, clientes, caixa, relatórios e preços dos serviços.</span>
+    <span><strong>Administrador</strong>: tudo isso + usuários, investimentos, categorias, taxas, backup e histórico de alterações.</span>
+    <span>Para tornar alguém administrador (ou tirar), toque em Editar. O sistema não deixa ficar sem nenhum administrador.</span>
   </div>`;
+  $$("[data-conf]").forEach(b => b.onclick = async () => {
+    if (await acao(b, () => api.confirmarEmail(b.dataset.conf), "E-mail confirmado")) vUsuarios();
+  });
+  $$("[data-liberar]").forEach(b => b.onclick = async () => {
+    const u = perfis.find(x => x.id === b.dataset.liberar);
+    const ok = await acao(b, async () => {
+      if (!u.email_confirmado) await api.confirmarEmail(u.id);
+      await api.atualizar("perfis", u.id, { ativo: true, papel: "atelie", nome: u.nome || u.email.split("@")[0] });
+    }, "Acesso liberado");
+    if (ok) render();
+  });
   $$("[data-usr]").forEach(b => b.onclick = () => {
     const u = perfis.find(x => x.id === b.dataset.usr);
     abreModal(`<header><h2>Editar usuário</h2><button class="close" data-close aria-label="Fechar">×</button></header>
@@ -880,11 +907,15 @@ async function vUsuarios() {
       <label class="f full">Nome<input type="text" id="unome" value="${esc(u.nome)}"></label>
       <label class="f">Acesso<select id="upapel"><option value="atelie" ${u.papel === "atelie" ? "selected" : ""}>Ateliê</option><option value="admin" ${u.papel === "admin" ? "selected" : ""}>Administrador</option></select></label>
       <label class="switch" style="align-self:end"><input type="checkbox" id="uativo" ${u.ativo ? "checked" : ""}> Acesso liberado</label>
-    </div><p class="hint">${esc(u.email)}. Para trocar a senha de outra pessoa ou excluir a conta, use o painel do Supabase.</p></div>
+    </div><p class="hint">${esc(u.email)} · e-mail ${u.email_confirmado ? "confirmado" : "não confirmado"}. Para trocar a senha de outra pessoa ou excluir a conta, use o painel do Supabase.</p></div>
     <footer><span></span><div style="display:flex;gap:8px"><button class="btn ghost" data-close>Cancelar</button><button class="btn primary" id="usalvar">Salvar</button></div></footer>`, () => {
       $("#usalvar").onclick = async e => {
         const campos = { nome: $("#unome").value.trim(), papel: $("#upapel").value, ativo: $("#uativo").checked };
-        if (await acao(e.currentTarget, async () => { await api.atualizar("perfis", u.id, campos); if (u.id === EU.id) EU = await api.meuPerfil(EU.id); }, "Usuário atualizado")) {
+        if (await acao(e.currentTarget, async () => {
+          if (campos.ativo && !u.email_confirmado) await api.confirmarEmail(u.id);
+          await api.atualizar("perfis", u.id, campos);
+          if (u.id === EU.id) EU = await api.meuPerfil(EU.id);
+        }, "Usuário atualizado")) {
           fechaModal(); if (!EU.ativo) { telaInativo(); return; } render();
         }
       };
