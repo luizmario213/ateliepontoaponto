@@ -4,9 +4,8 @@
   Cole aqui os dados do SEU projeto no Supabase:
   Supabase > Project Settings > API Keys
 
-  - supabaseUrl:  a "Project URL" (ex.: https://abcdefgh.supabase.co)
-  - supabaseKey:  a chave "Publishable" (começa com sb_publishable_)
-                  ou, em projeto antigo, a chave "anon public".
+  - supabaseUrl:  a "https://dgbzhkzsqqpqwqbntzfs.supabase.co
+  - supabaseKey:  a chave sb_publishable_7R7S3p1LBgphlQeLsjdIXA_RnhkuM1j
 
   Essas duas informações podem ficar públicas: quem protege os dados
   são as regras de segurança do banco (supabase.sql).
