@@ -53,6 +53,8 @@ function traduzErro(e) {
   if (/Failed to fetch|NetworkError|Load failed|fetch failed|ERR_INTERNET|network/i.test(msg))
     txt = "Sem conexão com o servidor. Nada foi salvo. Confira a internet e tente de novo.";
   else if (/Invalid login credentials/i.test(msg)) txt = "E-mail ou senha incorretos.";
+  else if (/already registered|already been registered|User already/i.test(msg)) txt = "Este e-mail já tem cadastro. Use “Entrar” ou “Esqueci minha senha”.";
+  else if (/Signups not allowed|signup.*disabled/i.test(msg)) txt = "O cadastro está desligado no Supabase. Peça ao administrador.";
   else if (/Email not confirmed/i.test(msg)) txt = "Este e-mail ainda não foi confirmado.";
   else if (/rate limit|too many/i.test(msg)) txt = "Muitas tentativas seguidas. Espere alguns minutos e tente de novo.";
   else if (/Password should be|password.*characters|weak/i.test(msg)) txt = "Senha fraca: use pelo menos 8 caracteres, misturando letras e números.";
@@ -93,6 +95,7 @@ function criarApiSupabase() {
     onAuth(fn) { sb.auth.onAuthStateChange((ev, s) => setTimeout(() => fn(ev, s), 0)); },
     entrar: (email, senha) => tenta(async () => ok(await sb.auth.signInWithPassword({ email, password: senha }))),
     sair: () => tenta(async () => { await sb.auth.signOut(); }),
+    cadastrar: (nome, email, senha) => tenta(async () => ok(await sb.auth.signUp({ email, password: senha, options: { data: { nome }, emailRedirectTo: location.origin + location.pathname } }))),
     esqueci: email => tenta(async () => ok(await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + location.pathname }))),
     novaSenha: senha => tenta(async () => ok(await sb.auth.updateUser({ password: senha }))),
     meuPerfil: uid => tenta(async () => ok(await sb.from("perfis").select("*").eq("id", uid).maybeSingle())),
@@ -124,6 +127,7 @@ let RAW = null;        // tabelas como vêm do banco (base do backup)
 let DB = null;         // formato usado pelas telas
 let EU = null;         // perfil de quem está logado
 let carregadoEm = 0;
+let PENDENTES = 0;     // cadastros aguardando liberação (só admin vê)
 const ST = { tab: "inicio", filtro: "abertos", busca: "", mes: mesDe(hoje()), limite: 150 };
 const STATUS = { recebido: "Recebido", andamento: "Em andamento", pronto: "Pronto p/ retirar", entregue: "Entregue" };
 
@@ -151,6 +155,7 @@ async function recarregar() {
   RAW = await api.carregar();
   DB = montarDB(RAW);
   carregadoEm = Date.now();
+  if (ehAdmin()) { try { PENDENTES = (await api.perfis()).filter(p => !p.ativo).length; } catch (e) { PENDENTES = 0; } }
 }
 /* executa uma gravação com o botão travado (evita toque duplo) e recarrega os dados */
 async function acao(btn, fn, okMsg) {
@@ -228,7 +233,9 @@ function telaLogin(msg) {
     <p class="erro-login" id="lerro" ${msg ? "" : "hidden"}>${esc(msg || "")}</p>
     <button class="btn primary" type="submit" id="lentrar">Entrar</button>
     <button class="link" type="button" id="lesqueci" style="justify-self:center">Esqueci minha senha</button>
+    <p class="muted" style="margin:0;text-align:center;font-size:14px">Ainda não tem acesso? <button class="link" type="button" id="lcriar">Criar conta</button></p>
   </form>`);
+  $("#lcriar").onclick = telaCadastro;
   const lembrado = store.get("pap-email"); if (lembrado) { $("#lemail").value = lembrado; $("#lsenha").focus(); } else $("#lemail").focus();
   const erro = m => { const e = $("#lerro"); e.textContent = m; e.hidden = !m; };
   $("#flogin").onsubmit = async e => {
@@ -244,6 +251,39 @@ function telaLogin(msg) {
     if (!email) { erro("Digite seu e-mail acima e toque de novo em “Esqueci minha senha”."); return; }
     try { await api.esqueci(email); erro(""); toast("Se o e-mail estiver cadastrado, chega um link para criar nova senha. Veja também o spam.", 7000); }
     catch (err) { erro(traduzErro(err).message); }
+  };
+}
+function telaCadastro() {
+  telaSimples(`<form id="fcad" novalidate style="display:grid;gap:16px">
+    <h1>Criar conta</h1>
+    <label class="f">Seu nome<input type="text" id="cnome2" autocomplete="name"></label>
+    <label class="f">E-mail<input type="email" id="cemail" autocomplete="email" inputmode="email"></label>
+    <label class="f">Senha<input type="password" id="cs1" autocomplete="new-password" minlength="8"><span class="hint">Pelo menos 8 caracteres, com letras e números.</span></label>
+    <label class="f">Repita a senha<input type="password" id="cs2" autocomplete="new-password"></label>
+    <p class="erro-login" id="cerro" hidden></p>
+    <button class="btn primary" type="submit" id="ccriar">Criar conta</button>
+    <p class="muted" style="margin:0;text-align:center;font-size:14px">Depois de criar, o administrador precisa liberar seu acesso.</p>
+    <button class="link" type="button" id="cvoltar" style="justify-self:center">Já tenho conta — entrar</button>
+  </form>`);
+  $("#cnome2").focus();
+  $("#cvoltar").onclick = () => telaLogin();
+  const erro = m => { const e = $("#cerro"); e.textContent = m; e.hidden = !m; };
+  $("#fcad").onsubmit = async e => {
+    e.preventDefault();
+    const nome = $("#cnome2").value.trim(), email = $("#cemail").value.trim(), a = $("#cs1").value, b = $("#cs2").value;
+    const msg = !nome ? "Informe seu nome." : !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) ? "E-mail inválido." :
+      a.length < 8 ? "A senha precisa ter pelo menos 8 caracteres." : !/[a-zA-Z]/.test(a) || !/\d/.test(a) ? "Use letras e números na senha." : a !== b ? "As senhas não são iguais." : "";
+    if (msg) { erro(msg); return; }
+    const bt = $("#ccriar"); bt.disabled = true; bt.textContent = "Criando…"; erro("");
+    try {
+      const r = await api.cadastrar(nome, email, a);
+      store.set("pap-email", email);
+      if (r && r.session) { await iniciarSessao(); return; }
+      telaSimples(`<h1>Confirme seu e-mail</h1>
+        <p class="muted" style="margin:0;text-align:center">Enviamos um link para <strong>${esc(email)}</strong>. Abra o e-mail (veja também o spam) e toque no link. Depois disso, o administrador libera seu acesso.</p>
+        <button class="btn ghost" id="cvolta2">Voltar para entrar</button>`);
+      $("#cvolta2").onclick = () => telaLogin();
+    } catch (err) { erro(traduzErro(err).message); bt.disabled = false; bt.textContent = "Criar conta"; }
   };
 }
 function telaNovaSenha() {
@@ -264,10 +304,12 @@ function telaNovaSenha() {
   };
 }
 function telaInativo() {
-  telaSimples(`<h1>Acesso ainda não liberado</h1>
-    <p class="muted" style="margin:0;text-align:center">Sua conta <strong>${esc(EU?.email || "")}</strong> existe, mas ainda não foi liberada. Peça ao administrador para ativar seu acesso.</p>
+  telaSimples(`<h1>Aguardando liberação</h1>
+    <p class="muted" style="margin:0;text-align:center">Sua conta <strong>${esc(EU?.email || "")}</strong> foi criada e está esperando o administrador liberar o acesso. Quando ele liberar, toque em “Verificar de novo”.</p>
+    <button class="btn primary" id="iverif">Verificar de novo</button>
     <button class="btn ghost" id="isair">Sair</button>`);
   $("#isair").onclick = sair;
+  $("#iverif").onclick = iniciarSessao;
 }
 function telaErroCarga(err) {
   telaSimples(`<h1>Não foi possível carregar</h1>
@@ -357,6 +399,7 @@ function vInicio() {
   const nome = (EU.nome || "").split(" ")[0];
   const delta = (a, b) => { if (!b) return `<span class="muted">sem dados do mês anterior</span>`; const d = (a - b) / Math.abs(b); return `<span class="${d >= 0 ? "up" : "down"}">${d >= 0 ? "▲" : "▼"} ${pct(Math.abs(d))}</span> vs. ${MESES[+prevMes(ym).slice(5) - 1]}`; };
   let avisos = "";
+  if (ehAdmin() && PENDENTES) avisos += `<div class="alerta"><span><strong>${PENDENTES} cadastro(s) aguardando liberação.</strong> Libere só quem você conhece.</span><button class="btn ghost small" data-go="usuarios">Ver cadastros</button></div>`;
   if (ehAdmin()) {
     const ult = DB.cfg.ultimo_backup;
     const dias = ult ? Math.floor((Date.now() - new Date(ult).getTime()) / 864e5) : null;
@@ -821,12 +864,13 @@ async function vUsuarios() {
   $("#view").innerHTML = `
   <div class="pagehead"><div><div class="eyebrow">Administração</div><h1>Usuários</h1><p>Quem pode entrar no sistema</p></div></div>
   <div class="tablewrap"><table><thead><tr><th>Nome</th><th>E-mail</th><th>Acesso</th><th>Situação</th><th></th></tr></thead><tbody>
-  ${perfis.map(u => `<tr><td><strong>${esc(u.nome || "—")}</strong>${u.id === EU.id ? ' <span class="tag">você</span>' : ""}</td><td>${esc(u.email)}</td><td><span class="tag">${u.papel === "admin" ? "Administrador" : "Ateliê"}</span></td><td>${u.ativo ? '<span class="pay done">ativo</span>' : '<span class="pay open">bloqueado</span>'}</td><td class="n"><button class="btn ghost small" data-usr="${u.id}">Editar</button></td></tr>`).join("")}
+  ${perfis.slice().sort((a, b) => a.ativo - b.ativo).map(u => `<tr><td><strong>${esc(u.nome || "—")}</strong>${u.id === EU.id ? ' <span class="tag">você</span>' : ""}</td><td>${esc(u.email)}</td><td><span class="tag">${u.papel === "admin" ? "Administrador" : "Ateliê"}</span></td><td>${u.ativo ? '<span class="pay done">ativo</span>' : '<span class="pay open">bloqueado</span>'}</td><td class="n"><button class="btn ghost small" data-usr="${u.id}">Editar</button></td></tr>`).join("")}
   </tbody></table></div>
   <div class="note" style="margin-top:14px;display:grid;gap:6px">
     <strong>Como adicionar alguém</strong>
-    <span>1. No Supabase: Authentication → Users → Add user → Create new user (e-mail + senha, marque “Auto Confirm User”).</span>
-    <span>2. A pessoa aparece aqui como <em>bloqueada</em>. Toque em Editar, dê um nome, escolha o acesso e ative.</span>
+    <span>1. A pessoa toca em “Criar conta” na tela de entrada (ou você cria em Supabase → Authentication → Users → Add user).</span>
+    <span>2. Ela aparece aqui como <em>bloqueada</em>. Toque em Editar, confira o nome, escolha o acesso e marque “Acesso liberado”.</span>
+    <span>Cadastro de desconhecido: deixe bloqueado ou exclua em Supabase → Authentication → Users.</span>
     <span><strong>Ateliê</strong>: pedidos, clientes, caixa, relatórios e preços. <strong>Administrador</strong>: tudo isso + usuários, investimentos, categorias, taxas, backup e histórico.</span>
   </div>`;
   $$("[data-usr]").forEach(b => b.onclick = () => {
