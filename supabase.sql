@@ -446,6 +446,37 @@ begin
     'clientes', jsonb_array_length(coalesce(b->'clientes','[]')));
 end $$;
 
+-- Lista de usuários para a aba Usuários (só administrador).
+create or replace function public.listar_usuarios()
+returns table (id uuid, email text, nome text, papel text, ativo boolean, criado_em timestamptz,
+               email_confirmado boolean, ultimo_acesso timestamptz)
+language plpgsql stable security definer set search_path = ''
+as $$
+begin
+  if not public.eh_admin() then raise exception 'Sem permissão.' using errcode = '42501'; end if;
+  return query
+    select p.id, p.email, p.nome, p.papel, p.ativo, p.criado_em,
+           (u.email_confirmed_at is not null), u.last_sign_in_at
+    from public.perfis p
+    join auth.users u on u.id = p.id
+    order by p.ativo, p.criado_em;
+end $$;
+
+-- Confirma o e-mail de uma conta pelo sistema (só administrador).
+create or replace function public.confirmar_email(p_id uuid)
+returns void language plpgsql security definer set search_path = ''
+as $$
+begin
+  if not public.eh_admin() then raise exception 'Sem permissão.' using errcode = '42501'; end if;
+  update auth.users set email_confirmed_at = coalesce(email_confirmed_at, now()) where id = p_id;
+  if not found then raise exception 'Usuário não encontrado.'; end if;
+end $$;
+
+revoke execute on function public.listar_usuarios() from public, anon;
+revoke execute on function public.confirmar_email(uuid) from public, anon;
+grant  execute on function public.listar_usuarios() to authenticated;
+grant  execute on function public.confirmar_email(uuid) to authenticated;
+
 revoke execute on function public.salvar_pedido(jsonb) from public, anon;
 revoke execute on function public.receber_pagamento(uuid, uuid, numeric, text, numeric, date, boolean) from public, anon;
 revoke execute on function public.importar_backup(jsonb) from public, anon;
